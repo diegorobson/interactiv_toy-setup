@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Brinquedo Interativo com IA — Wi-Fi</title>
+  <style>
+    :root {
+      --accent: #e8553d;
+      --bg: #1a1a1a;
+      --card: #262626;
+      --text: #f5f5f5;
+      --muted: #a3a3a3;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, "Segoe UI", Roboto, sans-serif;
+      margin: 0;
+      padding: 1.25rem;
+      background: var(--bg);
+      color: var(--text);
+      max-width: 28rem;
+      margin-inline: auto;
+    }
+    h1 { font-size: 1.15rem; font-weight: 600; margin: 0 0 0.5rem; }
+    p { color: var(--muted); font-size: 0.9rem; line-height: 1.45; margin: 0 0 1rem; }
+    label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.35rem; }
+    input {
+      width: 100%;
+      padding: 0.65rem 0.75rem;
+      border-radius: 8px;
+      border: 1px solid #404040;
+      background: var(--card);
+      color: var(--text);
+      margin-bottom: 0.9rem;
+      font-size: 1rem;
+    }
+    button {
+      width: 100%;
+      padding: 0.75rem 1rem;
+      border: none;
+      border-radius: 8px;
+      background: var(--accent);
+      color: #fff;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    .note {
+      font-size: 0.78rem;
+      color: var(--muted);
+      margin-top: 1rem;
+      padding-top: 1rem;
+      border-top: 1px solid #333;
+    }
+    #status { margin-top: 1rem; font-size: 0.88rem; white-space: pre-wrap; }
+    .err { color: #f87171; }
+    .ok { color: #4ade80; }
+  </style>
+</head>
+<body>
+  <h1>Brinquedo Interativo com IA</h1>
+  <p>Conecte-se ao brinquedo por Bluetooth (sem trocar o Wi-Fi do celular). Use <strong>Chrome no Android</strong>. Informe a rede 2,4&nbsp;GHz e a senha.</p>
+
+  <label for="ssid">Nome da rede (SSID)</label>
+  <input id="ssid" type="text" autocomplete="off" />
+
+  <label for="pass">Senha</label>
+  <input id="pass" type="password" autocomplete="off" />
+
+  <button id="btn" type="button">Conectar ao brinquedo e enviar</button>
+  <div id="status"></div>
+  <p class="note">
+    UUIDs devem coincidir com o firmware. iPhone/Safari costumam não permitir Web Bluetooth; nesse caso use um Android ou recompile com modo ponto de acesso (SoftAP) como alternativa.
+  </p>
+
+  <script>
+    /** Mesmos UUIDs definidos em interactive_toy.ino */
+    const BLE_SERVICE = "b0896a4f-09cd-4d2c-aa4e-8c9b9a8b7c6d";
+    const BLE_CHAR_WIFI = "b0896a4f-09cd-4d2c-aa4e-8c9b9a8b7c6e";
+
+    const statusEl = document.getElementById("status");
+    const btn = document.getElementById("btn");
+
+    function setStatus(msg, cls) {
+      statusEl.textContent = msg;
+      statusEl.className = cls || "";
+    }
+
+    btn.addEventListener("click", async () => {
+      const ssid = document.getElementById("ssid").value.trim();
+      const pass = document.getElementById("pass").value;
+      if (!ssid) {
+        setStatus("Informe o nome da rede.", "err");
+        return;
+      }
+      if (!navigator.bluetooth) {
+        setStatus("Este navegador não suporta Web Bluetooth. Use Chrome no Android.", "err");
+        return;
+      }
+
+      btn.disabled = true;
+      setStatus("Procurando brinquedo (BrinqIA-Setup)…");
+
+      try {
+        const device = await navigator.bluetooth.requestDevice({
+          filters: [{ namePrefix: "Brinq" }],
+          optionalServices: [BLE_SERVICE]
+        });
+
+        setStatus("Conectando a GATT…");
+        const server = await device.gatt.connect();
+        const service = await server.getPrimaryService(BLE_SERVICE);
+        const characteristic = await service.getCharacteristic(BLE_CHAR_WIFI);
+
+        const payload = new TextEncoder().encode(JSON.stringify({ ssid, pass }));
+        await characteristic.writeValue(payload);
+
+        setStatus("Credenciais enviadas. O brinquedo vai reiniciar e conectar na rede.", "ok");
+        device.gatt.disconnect();
+      } catch (e) {
+        console.error(e);
+        setStatus(String(e && e.message ? e.message : e), "err");
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
