@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Content-Security-Policy" content="upgrade-insecure-requests" />
   <title>Brinquedo Interativo com IA — Wi-Fi</title>
   <style>
     :root {
@@ -25,7 +26,7 @@
     h1 { font-size: 1.15rem; font-weight: 600; margin: 0 0 0.5rem; }
     p { color: var(--muted); font-size: 0.9rem; line-height: 1.45; margin: 0 0 1rem; }
     label { display: block; font-size: 0.8rem; color: var(--muted); margin-bottom: 0.35rem; }
-    input {
+    input, select {
       width: 100%;
       padding: 0.65rem 0.75rem;
       border-radius: 8px;
@@ -45,7 +46,9 @@
       font-size: 1rem;
       font-weight: 600;
       cursor: pointer;
+      margin-bottom: 0.6rem;
     }
+    button.secondary { background: #404040; }
     button:disabled { opacity: 0.45; cursor: not-allowed; }
     .note {
       font-size: 0.78rem;
@@ -61,69 +64,197 @@
 </head>
 <body>
   <h1>Brinquedo Interativo com IA</h1>
-  <p>Conecte-se ao brinquedo por Bluetooth (sem trocar o Wi-Fi do celular). Use <strong>Chrome no Android</strong>. Informe a rede 2,4&nbsp;GHz e a senha.</p>
+  <p>Chrome no Android. Rede <strong>2,4&nbsp;GHz</strong>. O telefone lista o Wi-Fi <strong>pelo brinquedo</strong>, não pelo navegador.</p>
+  <div id="androidChromeHint">
+    <p class="note" style="margin:0 0 0.75rem;padding:0;border:none;font-size:0.82rem;">
+      Se ao escanear o QR a página ficar em branco ou não carregar, use <strong>Abrir no Chrome</strong> abaixo (leitores internos às vezes não redirecionam para HTTPS).
+    </p>
+    <button id="btnOpenChrome" type="button" class="secondary">Abrir no Chrome (Android)</button>
+  </div>
 
-  <label for="ssid">Nome da rede (SSID)</label>
-  <input id="ssid" type="text" autocomplete="off" />
+  <button id="btnConnect" type="button" class="secondary">1. Conectar ao brinquedo (Bluetooth)</button>
+  <button id="btnScan" type="button" class="secondary" disabled>2. Buscar redes Wi-Fi</button>
+
+  <label for="ssid">Rede (SSID)</label>
+  <select id="ssidSelect" aria-label="Redes encontradas">
+    <option value="">— Busque redes ou digite abaixo —</option>
+  </select>
+  <input id="ssid" type="text" autocomplete="off" placeholder="Ou digite o nome da rede manualmente" />
 
   <label for="pass">Senha</label>
   <input id="pass" type="password" autocomplete="off" />
 
-  <button id="btn" type="button">Conectar ao brinquedo e enviar</button>
+  <button id="btnSend" type="button" disabled>3. Enviar para o brinquedo</button>
   <div id="status"></div>
   <p class="note">
-    UUIDs devem coincidir com o firmware. iPhone/Safari costumam não permitir Web Bluetooth; nesse caso use um Android ou recompile com modo ponto de acesso (SoftAP) como alternativa.
+    iPhone/Safari costumam não suportar Web Bluetooth. A lista de redes depende do escaneamento do ESP32 perto do seu roteador.
   </p>
 
   <script>
-    /** Mesmos UUIDs definidos em interactive_toy.ino */
+    (function forceHttps() {
+      if (location.protocol !== "http:") return;
+      var host = location.hostname;
+      if (host === "localhost" || host === "127.0.0.1") return;
+      location.replace("https://" + host + location.pathname + location.search + location.hash);
+    })();
+
     const BLE_SERVICE = "b0896a4f-09cd-4d2c-aa4e-8c9b9a8b7c6d";
     const BLE_CHAR_WIFI = "b0896a4f-09cd-4d2c-aa4e-8c9b9a8b7c6e";
+    const BLE_CHAR_SCAN_CMD = "b0896a4f-09cd-4d2c-aa4e-8c9b9a8b7c6f";
+    const BLE_CHAR_SCAN_RESULT = "b0896a4f-09cd-4d2c-aa4e-8c9b9a8b7c70";
 
     const statusEl = document.getElementById("status");
-    const btn = document.getElementById("btn");
+    const btnOpenChrome = document.getElementById("btnOpenChrome");
+    const androidChromeHint = document.getElementById("androidChromeHint");
+    if (!/Android/i.test(navigator.userAgent)) androidChromeHint.style.display = "none";
+    const btnConnect = document.getElementById("btnConnect");
+    const btnScan = document.getElementById("btnScan");
+    const btnSend = document.getElementById("btnSend");
+    const ssidSelect = document.getElementById("ssidSelect");
+    const ssidInput = document.getElementById("ssid");
+
+    let gattServer = null;
+    let wifiService = null;
 
     function setStatus(msg, cls) {
       statusEl.textContent = msg;
       statusEl.className = cls || "";
     }
 
-    btn.addEventListener("click", async () => {
-      const ssid = document.getElementById("ssid").value.trim();
-      const pass = document.getElementById("pass").value;
-      if (!ssid) {
-        setStatus("Informe o nome da rede.", "err");
-        return;
-      }
+    function resetSelect() {
+      ssidSelect.innerHTML = "";
+      const o = document.createElement("option");
+      o.value = "";
+      o.textContent = "— Escolha uma rede ou digite abaixo —";
+      ssidSelect.appendChild(o);
+    }
+
+    ssidSelect.addEventListener("change", () => {
+      if (ssidSelect.value) ssidInput.value = ssidSelect.value;
+    });
+
+    btnOpenChrome.addEventListener("click", () => {
+      var host = location.host;
+      var path = location.pathname + location.search + location.hash;
+      var intent =
+        "intent://" +
+        host +
+        path +
+        "#Intent;scheme=https;package=com.android.chrome;end";
+      window.location.href = intent;
+    });
+
+    btnConnect.addEventListener("click", async () => {
       if (!navigator.bluetooth) {
-        setStatus("Este navegador não suporta Web Bluetooth. Use Chrome no Android.", "err");
+        setStatus("Use Chrome no Android com Web Bluetooth.", "err");
         return;
       }
-
-      btn.disabled = true;
-      setStatus("Procurando brinquedo (BrinqIA-Setup)…");
-
+      btnConnect.disabled = true;
+      setStatus("Escolha BrinqIA-Setup…");
       try {
         const device = await navigator.bluetooth.requestDevice({
           filters: [{ namePrefix: "Brinq" }],
           optionalServices: [BLE_SERVICE]
         });
-
-        setStatus("Conectando a GATT…");
-        const server = await device.gatt.connect();
-        const service = await server.getPrimaryService(BLE_SERVICE);
-        const characteristic = await service.getCharacteristic(BLE_CHAR_WIFI);
-
-        const payload = new TextEncoder().encode(JSON.stringify({ ssid, pass }));
-        await characteristic.writeValue(payload);
-
-        setStatus("Credenciais enviadas. O brinquedo vai reiniciar e conectar na rede.", "ok");
-        device.gatt.disconnect();
+        gattServer = await device.gatt.connect();
+        wifiService = await gattServer.getPrimaryService(BLE_SERVICE);
+        setStatus("Conectado. Toque em \"Buscar redes Wi-Fi\".", "ok");
+        btnScan.disabled = false;
+        btnSend.disabled = false;
+        device.addEventListener("gattserverdisconnected", () => {
+          gattServer = null;
+          wifiService = null;
+          btnScan.disabled = true;
+          btnSend.disabled = true;
+          setStatus("Bluetooth desconectou. Conecte de novo.", "err");
+        });
       } catch (e) {
         console.error(e);
         setStatus(String(e && e.message ? e.message : e), "err");
       } finally {
-        btn.disabled = false;
+        btnConnect.disabled = false;
+      }
+    });
+
+    btnScan.addEventListener("click", async () => {
+      if (!wifiService) {
+        setStatus("Conecte primeiro.", "err");
+        return;
+      }
+      btnScan.disabled = true;
+      setStatus("Escaneando redes no brinquedo (até ~15 s)…");
+      try {
+        const cmdChar = await wifiService.getCharacteristic(BLE_CHAR_SCAN_CMD);
+        const resChar = await wifiService.getCharacteristic(BLE_CHAR_SCAN_RESULT);
+
+        const data = await new Promise((resolve, reject) => {
+          const to = setTimeout(() => {
+            resChar.removeEventListener("characteristicvaluechanged", onNotify);
+            reject(new Error("Tempo esgotado no escaneamento."));
+          }, 18000);
+
+          function onNotify(ev) {
+            clearTimeout(to);
+            resChar.removeEventListener("characteristicvaluechanged", onNotify);
+            resolve(ev.target.value);
+          }
+
+          resChar.addEventListener("characteristicvaluechanged", onNotify);
+          resChar.startNotifications().then(() => {
+            return cmdChar.writeValue(new TextEncoder().encode('{"cmd":"scan"}'));
+          }).catch((err) => {
+            clearTimeout(to);
+            resChar.removeEventListener("characteristicvaluechanged", onNotify);
+            reject(err);
+          });
+        });
+
+        const text = new TextDecoder().decode(data);
+        const json = JSON.parse(text);
+        const list = json.networks || [];
+        resetSelect();
+        for (const name of list) {
+          const o = document.createElement("option");
+          o.value = name;
+          o.textContent = name;
+          ssidSelect.appendChild(o);
+        }
+        setStatus(list.length ? list.length + " rede(s). Escolha na lista ou digite." : "Nenhuma rede. Digite o SSID manualmente.", "ok");
+      } catch (e) {
+        console.error(e);
+        setStatus(String(e && e.message ? e.message : e), "err");
+      } finally {
+        btnScan.disabled = !wifiService;
+      }
+    });
+
+    btnSend.addEventListener("click", async () => {
+      const ssid = (ssidInput.value || ssidSelect.value || "").trim();
+      const pass = document.getElementById("pass").value;
+      if (!ssid) {
+        setStatus("Informe ou escolha a rede.", "err");
+        return;
+      }
+      if (!wifiService) {
+        setStatus("Conecte ao brinquedo primeiro.", "err");
+        return;
+      }
+      btnSend.disabled = true;
+      setStatus("Enviando credenciais…");
+      try {
+        const ch = await wifiService.getCharacteristic(BLE_CHAR_WIFI);
+        const payload = new TextEncoder().encode(JSON.stringify({ ssid, pass }));
+        await ch.writeValue(payload);
+        setStatus("Enviado. O brinquedo vai reiniciar.", "ok");
+        if (gattServer && gattServer.connected) gattServer.disconnect();
+        gattServer = null;
+        wifiService = null;
+        btnScan.disabled = true;
+      } catch (e) {
+        console.error(e);
+        setStatus(String(e && e.message ? e.message : e), "err");
+      } finally {
+        btnSend.disabled = !wifiService;
       }
     });
   </script>
